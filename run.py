@@ -5,7 +5,7 @@ from distributions import sample_truncated_normal
 SIMULATIONS = 1000
 RUN_UNTIL = 100
 
-num_queues = [1, 3, 5, 7, 9, 11, 13]
+num_queues = [1, 2, 4, 6, 8, 10, 12]
 avg_waiting_times = []
 arrival_rate = 10 # minutes
 service_rate = 1/2 # minutes
@@ -14,8 +14,8 @@ service_rate = 1/2 # minutes
 mu = service_rate
 sigma = 1/6  # a sixth of a minute (10 seconds)
 
-mu_additional = 2
-sigma_additional = 2  
+mu_additional = 2 # minutes 
+sigma_additional = 2 # minutes 
 
 service_distribution = (0.5, 1/6)
 additional_screening_distribution = (2.0, 2.0)
