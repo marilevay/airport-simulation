@@ -8,19 +8,24 @@ from tqdm import tqdm
 from distributions import sample_truncated_normal
 
 class Passenger:
-    def __init__(self, id, arrival_time, service_start_time=None, service_end_time=None):
+    def __init__(self, id, arrival_time, service_start_time=None, service_end_time=None, p_screen=0.03):
         self.id = id
         self.arrival_time = arrival_time
         self.service_start_time = service_start_time
         self.service_end_time = service_end_time
-        # Determine if the passenger needs additional screening using a Bernoulli trial with 3% prob
-        self.needs_additional_screening = True if sts.bernoulli.rvs(p=0.03) == 1 else False 
+        self.base_service_end_time = None  # optional, included here for analysis
+        self.needs_additional_screening = bool(sts.bernoulli.rvs(p=p_screen))
 
     def total_queue_time(self):
-        return self.service_start_time - self.arrival_time
+        if self.service_start_time is None:
+            return None
+        return max(0.0, self.service_start_time - self.arrival_time)
 
     def total_service_time(self):
-        return self.service_end_time - self.service_start_time
+        if self.service_start_time is None or self.service_end_time is None:
+            return None
+        return max(0.0, self.service_end_time - self.service_start_time)
+
 
     def __repr__(self):
         waiting_time = f"{self.total_queue_time():.2f}" if self.total_queue_time() is not None else "N/A"
@@ -39,41 +44,31 @@ class Queue:
         self.being_served = None  # Single passenger being served (or None if server is free)
         
         if service_distribution is None:
-            mu = service_rate
-            sigma = 1/6
-            service_distribution = sample_truncated_normal(mu, sigma)
-            
-        self.service_distribution = service_distribution
-        
-        if additional_screening_distribution is None:
-            additional_mu = 2  # minutes
-            additional_sigma = 2  # minutes
-            additional_screening_distribution = sample_truncated_normal(additional_mu, additional_sigma)
+            self.service_mu, self.service_sigma = 0.5, 1/6
+        else:
+            self.service_mu, self.service_sigma = service_distribution
 
-        self.additional_screening_distribution = additional_screening_distribution
+        if additional_screening_distribution is None:
+            self.add_mu, self.add_sigma = 2.0, 2.0  # mean of 2 minutes, stddev of 2 minutes
+        else:
+            self.add_mu, self.add_sigma = additional_screening_distribution
         
     def __lt__(self, other):
         return self.timestamp < other.timestamp
     
     # Calculate the duration of the service for a particular person in the queue
     def determine_service_duration(self, passenger):
-        # Regular service duration
-        base_service_duration = self.service_distribution
-        
-        if passenger.needs_additional_screening:
-            additional_service_duration = self.additional_screening_distribution
-            total_Service_duration = base_service_duration + additional_service_duration
-        else:
-            total_Service_duration = base_service_duration
+        # Only return the base service at the checkpoint
+        return sample_truncated_normal(self.service_mu, self.service_sigma)
 
-        return total_Service_duration
+
 
     def start_service(self, passenger, now):
         self.being_served = passenger
         passenger.service_start_time = now
         service_duration = self.determine_service_duration(passenger)
         end_service_time = now + service_duration
-        passenger.service_end_time = end_service_time
+        passenger.base_service_end_time = end_service_time  # checkpoint done
 
         return end_service_time
         
@@ -103,8 +98,10 @@ class Airport:
     def __init__(self, arrival_rate, service_rate, num_queues=1, service_distribution=None, additional_screening_distribution=None):
         self.priority_q = []
         self.now = 0
+        self.officer_busy_until = 0
         self.arrival_rate = arrival_rate
         self.num_queues = num_queues
+        self.screening_prob = 0.03
         self.passenger_queues = [Queue(timestamp=0, service_rate=service_rate, service_distribution=service_distribution, additional_screening_distribution=additional_screening_distribution) for _ in range(num_queues)] # multiple queues
         self.curr_arrival_time = 0
         self.passenger_counter = 0  # for unique passenger IDs
@@ -121,14 +118,16 @@ class Airport:
                    
     def add_arrival(self, now):
         """
-        Schedule the next passenger arrival.
+        Schedule the next passenger arrival event.
 
         now : float
             Current simulation time.
 
         Event encoding:
-          1 = passenger arrival
-          0 = passenger departure
+            1 = passenger arrival
+            0 = departure from normal queue
+            2 = officer screening finished
+
         """
         arrival_time = now
         distribution = sts.expon(scale=1/self.arrival_rate)
@@ -136,38 +135,64 @@ class Airport:
         arrival_time += sampled_interarrival_time[0] 
         self.curr_arrival_time = arrival_time
         
-        # Select shortest queue to add the passenger to
-        selected_queue = self.find_shortest_queue()
-        
         self.passenger_counter += 1
-        passenger = Passenger(id=self.passenger_counter, arrival_time=arrival_time)
+        passenger = Passenger(id=self.passenger_counter, arrival_time=arrival_time, p_screen=self.screening_prob)
         self.all_passengers[passenger.id] = passenger 
-        selected_queue.add_passenger(passenger)
         
         # Create passenger and schedule arrival
-        heapq.heappush(self.priority_q, (arrival_time, (1, selected_queue, passenger.id)))
+        heapq.heappush(self.priority_q, (arrival_time, (1, None, passenger.id)))
     
     def run_next_service(self):
         timestamp, event_info = heapq.heappop(self.priority_q)
         self.now = timestamp
 
-        event_type, queue, passenger_id = event_info  # now both events have the same structure
+        event_type, queue, passenger_id = event_info
 
         if event_type == 1:  # arrival
-            if queue.being_served_count() == 0:  # if the server is free
-                passenger = queue.get_next_passenger()  # remove them from waiting
-                end_service_time = queue.start_service(passenger, self.now)
-                heapq.heappush(self.priority_q, (end_service_time, (0, queue, passenger_id)))  # schedule departure
+            passenger = self.all_passengers[passenger_id]
+            selected_queue = self.find_shortest_queue()
+            selected_queue.add_passenger(passenger)
+
+            if selected_queue.being_served_count() == 0:  # if server is free
+                passenger = selected_queue.get_next_passenger()
+                end_service_time = selected_queue.start_service(passenger, self.now)
+                heapq.heappush(self.priority_q, (end_service_time, (0, selected_queue, passenger.id)))
+
+        elif event_type == 0:  # base service finished at a station
+            passenger = self.all_passengers[passenger_id]
+            
+            if passenger.needs_additional_screening:
+                # Don't end_service yet, keep server occupied by this passenger
+                start_screen = max(passenger.base_service_end_time, self.officer_busy_until)
+                duration = sample_truncated_normal(queue.add_mu, queue.add_sigma)
+                end_screen = start_screen + duration
+                self.officer_busy_until = end_screen
+
+                # final completion of service becomes officer end
+                passenger.service_end_time = end_screen
+
+                # schedule officer completion; only then free the station
+                heapq.heappush(self.priority_q, (end_screen, (2, queue, passenger.id)))
             else:
-                pass  # server is busy, do nothing (since the passenger is already in waiting queue)
+                # end service immediately if no additional screening needed
+                passenger.service_end_time = passenger.base_service_end_time
+                
+                # no additional screening: free server and start next
+                queue.end_service()
+                next_passenger = queue.get_next_passenger()
+                if next_passenger:
+                    end_service_time = queue.start_service(next_passenger, self.now)
+                    heapq.heappush(self.priority_q, (end_service_time, (0, queue, next_passenger.id)))
 
-        elif event_type == 0:  # departure
+        elif event_type == 2:  # officer finished screening passenger
+            # Now free the station and start the next person, if any
             queue.end_service()
-            passenger = queue.get_next_passenger()
+            next_passenger = queue.get_next_passenger()
+            if next_passenger:
+                end_service_time = queue.start_service(next_passenger, self.now)
+                heapq.heappush(self.priority_q, (end_service_time, (0, queue, next_passenger.id)))
 
-            if passenger: # if there's people still waiting in this specific queue
-                end_service_time = queue.start_service(passenger, self.now)
-                heapq.heappush(self.priority_q, (end_service_time, (0, queue, passenger.id))) # schedule departure
+
                                
     def __repr__(self):
         total_waiting = sum(q.waiting_count() for q in self.passenger_queues)
@@ -186,14 +211,14 @@ class Airport:
         print(repr(self))
         for time, event in sorted(self.priority_q):
             event_type, queue, passenger_id = event
-            # Check if a passenger needed additional screening
-            needed_screening = True if self.all_passengers[passenger_id].needs_additional_screening else False
-            queue_index = self.passenger_queues.index(queue)
-            event_name = "arrival" if event_type == 1 else "departure"
-            
-            if needed_screening:
-                print(f"\t [Additional Screening] Scheduled Timestamp (minutes) {np.round(time, 2)}: {event_name} for passenger {passenger_id} at queue {queue_index + 1}")
-            else:
-                print(f"\t Scheduled Timestamp (minutes) {np.round(time, 2)}: {event_name} for passenger {passenger_id} at queue {queue_index + 1}")
+            passenger = self.all_passengers[passenger_id]
+            queue_index = self.passenger_queues.index(queue) + 1 if queue else None
 
+            if event_type == 1:  # arrival
+                print(f"\t[Arrival]    t={time:.2f}: Passenger {passenger_id} → Queue {queue_index}")
+            elif event_type == 0:  # departure from normal queue
+                note = " (needs screening)" if passenger.needs_additional_screening else ""
+                print(f"\t[Departure]  t={time:.2f}: Passenger {passenger_id} left Queue {queue_index}{note}")
+            elif event_type == 2:   # officer finished screening
+                print(f"\t[Officer]    t={time:.2f}: Passenger {passenger_id} finished screening")
         print("\n")

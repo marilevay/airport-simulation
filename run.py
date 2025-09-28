@@ -17,8 +17,8 @@ sigma = 1/6  # a sixth of a minute (10 seconds)
 mu_additional = 2
 sigma_additional = 2  
 
-service_distribution = sample_truncated_normal(mu, sigma)
-additional_screening_distribution = sample_truncated_normal(mu_additional, sigma_additional)
+service_distribution = (0.5, 1/6)
+additional_screening_distribution = (2.0, 2.0)
 
 # Run simulations for different queue numbers
 print("\n--- Multiple Queue Airport Simulation ---\n")
@@ -29,12 +29,12 @@ for n in num_queues:
     queue_waiting_times = []  # Store waiting times for this queue configuration
 
     for _ in tqdm(range(SIMULATIONS), desc="Simulations"):
-        avg_queue_lens, arrivals_multi, all_passengers = run_simulation(arrival_rate=arrival_rate, service_rate=service_rate, num_queues=n, service_distribution=service_distribution, additional_screening_distribution=additional_screening_distribution, run_until=RUN_UNTIL)
+        avg_queue_lens, arrivals_multi, all_passengers, max_queue_length = run_simulation(arrival_rate=arrival_rate, service_rate=service_rate, num_queues=n, service_distribution=service_distribution, additional_screening_distribution=additional_screening_distribution, run_until=RUN_UNTIL)
 
         waiting_times = []
         for passenger in all_passengers.values():
-            total_waiting_time = passenger.total_queue_time() + passenger.total_service_time()
-            waiting_times.append(total_waiting_time)
+            if passenger.service_start_time is not None and passenger.service_end_time is not None:
+                waiting_times.append(passenger.total_queue_time())   # waiting only
 
         # Calculate average waiting time for this simulation
         avg_wait_time = np.mean(waiting_times) 
